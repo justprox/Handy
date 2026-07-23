@@ -30,18 +30,23 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
     useSettings();
   const [keyPressed, setKeyPressed] = useState<string[]>([]);
   const [recordedKeys, setRecordedKeys] = useState<string[]>([]);
-  const [editingShortcutId, setEditingShortcutId] = useState<string | null>(
-    null,
-  );
+  const [recordingIndex, setRecordingIndex] = useState<number | "add" | null>(null);
   const [originalBinding, setOriginalBinding] = useState<string>("");
   const shortcutRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
   const osType = useOsType();
 
   const bindings = getSetting("bindings") || {};
+  const binding = bindings[shortcutId];
+  const shortcuts = (binding?.current_binding || "")
+    .split(", ")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const isRecording = recordingIndex !== null;
 
   useEffect(() => {
     // Only add event listeners when we're in editing mode
-    if (editingShortcutId === null) return;
+    if (recordingIndex === null) return;
 
     let cleanup = false;
 
@@ -101,10 +106,19 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
           return 0;
         });
         const newShortcut = sortedKeys.join("+");
+        let newBindingValue = "";
 
-        if (editingShortcutId && bindings[editingShortcutId]) {
+        if (recordingIndex === "add") {
+          newBindingValue = [...shortcuts, newShortcut].join(", ");
+        } else {
+          const updated = [...shortcuts];
+          updated[recordingIndex] = newShortcut;
+          newBindingValue = updated.join(", ");
+        }
+
+        if (binding) {
           try {
-            await updateBinding(editingShortcutId, newShortcut);
+            await updateBinding(shortcutId, newBindingValue);
           } catch (error) {
             console.error("Failed to change binding:", error);
             toast.error(
@@ -116,7 +130,7 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
             // Reset to original binding on error
             if (originalBinding) {
               try {
-                await updateBinding(editingShortcutId, originalBinding);
+                await updateBinding(shortcutId, originalBinding);
               } catch (resetError) {
                 console.error("Failed to reset binding:", resetError);
                 toast.error(t("settings.general.shortcut.errors.reset"));
@@ -125,7 +139,7 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
           }
 
           // Exit editing mode and reset states
-          setEditingShortcutId(null);
+          setRecordingIndex(null);
           setKeyPressed([]);
           setRecordedKeys([]);
           setOriginalBinding("");
@@ -136,20 +150,21 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
     // Add click outside handler
     const handleClickOutside = async (e: MouseEvent) => {
       if (cleanup) return;
-      const activeElement = shortcutRefs.current.get(editingShortcutId);
+      const refKey = `${shortcutId}_${recordingIndex}`;
+      const activeElement = shortcutRefs.current.get(refKey);
       if (activeElement && !activeElement.contains(e.target as Node)) {
         // Cancel shortcut recording and restore original binding
-        if (editingShortcutId && originalBinding) {
+        if (originalBinding) {
           try {
-            await updateBinding(editingShortcutId, originalBinding);
+            await updateBinding(shortcutId, originalBinding);
           } catch (error) {
             console.error("Failed to restore original binding:", error);
             toast.error(t("settings.general.shortcut.errors.restore"));
           }
-        } else if (editingShortcutId) {
-          commands.resumeBinding(editingShortcutId).catch(console.error);
+        } else {
+          commands.resumeBinding(shortcutId).catch(console.error);
         }
-        setEditingShortcutId(null);
+        setRecordingIndex(null);
         setKeyPressed([]);
         setRecordedKeys([]);
         setOriginalBinding("");
@@ -169,25 +184,45 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
   }, [
     keyPressed,
     recordedKeys,
-    editingShortcutId,
-    bindings,
+    recordingIndex,
+    shortcuts,
+    binding,
     originalBinding,
     updateBinding,
     osType,
+    shortcutId,
+    t,
   ]);
 
-  // Start recording a new shortcut
-  const startRecording = async (id: string) => {
-    if (editingShortcutId === id) return; // Already editing this shortcut
+  // Start recording a new shortcut or editing one
+  const startRecording = async (index: number | "add") => {
+    if (recordingIndex !== null) return; // Already editing
 
     // Suspend current binding to avoid firing while recording
-    await commands.suspendBinding(id).catch(console.error);
+    await commands.suspendBinding(shortcutId).catch(console.error);
 
     // Store the original binding to restore if canceled
-    setOriginalBinding(bindings[id]?.current_binding || "");
-    setEditingShortcutId(id);
+    setOriginalBinding(binding?.current_binding || "");
+    setRecordingIndex(index);
     setKeyPressed([]);
     setRecordedKeys([]);
+  };
+
+  // Remove a shortcut from the list
+  const removeShortcut = async (indexToRemove: number) => {
+    if (shortcuts.length <= 1) {
+      toast.warning(t("settings.general.shortcut.errors.keepAtLeastOne", "At least one shortcut must be configured."));
+      return;
+    }
+    const updated = shortcuts.filter((_, idx) => idx !== indexToRemove);
+    const newBindingValue = updated.join(", ");
+    try {
+      await updateBinding(shortcutId, newBindingValue);
+      toast.success(t("settings.general.shortcut.removed", "Shortcut removed"));
+    } catch (error) {
+      console.error("Failed to remove shortcut:", error);
+      toast.error(t("settings.general.shortcut.errors.remove", "Failed to remove shortcut"));
+    }
   };
 
   // Format the current shortcut keys being recorded
@@ -200,8 +235,8 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
   };
 
   // Store references to shortcut elements
-  const setShortcutRef = (id: string, ref: HTMLDivElement | null) => {
-    shortcutRefs.current.set(id, ref);
+  const setShortcutRef = (index: number | "add", ref: HTMLDivElement | null) => {
+    shortcutRefs.current.set(`${shortcutId}_${index}`, ref);
   };
 
   // If still loading, show loading state
@@ -236,7 +271,6 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
     );
   }
 
-  const binding = bindings[shortcutId];
   if (!binding) {
     return (
       <SettingContainer
@@ -271,26 +305,68 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
       disabled={disabled}
       layout="horizontal"
     >
-      <div className="flex items-center space-x-1">
-        {editingShortcutId === shortcutId ? (
-          <div
-            ref={(ref) => setShortcutRef(shortcutId, ref)}
-            className="px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
-          >
-            {formatCurrentKeys()}
-          </div>
-        ) : (
-          <div
-            className="px-2 py-1 text-sm font-semibold bg-mid-gray/10 border border-mid-gray/80 hover:bg-logo-primary/10 rounded-md cursor-pointer hover:border-logo-primary"
-            onClick={() => startRecording(shortcutId)}
-          >
-            {formatKeyCombination(binding.current_binding, osType)}
-          </div>
-        )}
-        <ResetButton
-          onClick={() => resetBinding(shortcutId)}
-          disabled={isUpdating(`binding_${shortcutId}`)}
-        />
+      <div className="flex flex-col space-y-2 w-full max-w-md items-end">
+        <div className="flex flex-wrap gap-2 justify-end items-center">
+          {shortcuts.map((sc, index) => {
+            const isThisRecording = recordingIndex === index;
+            return (
+              <div key={index} className="flex items-center space-x-1">
+                {isThisRecording ? (
+                  <div
+                    ref={(ref) => setShortcutRef(index, ref)}
+                    className="px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
+                  >
+                    {formatCurrentKeys()}
+                  </div>
+                ) : (
+                  <div className="flex items-center bg-mid-gray/10 border border-mid-gray/80 hover:border-logo-primary hover:bg-logo-primary/5 rounded-md overflow-hidden">
+                    <span
+                      className="px-2 py-1 text-sm font-semibold cursor-pointer select-none"
+                      onClick={() => startRecording(index)}
+                      title={t("settings.general.shortcut.clickToEdit", "Click to edit")}
+                    >
+                      {formatKeyCombination(sc, osType)}
+                    </span>
+                    {shortcuts.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => removeShortcut(index)}
+                        className="px-1.5 py-1 text-xs hover:text-red-500 text-text/50 border-l border-mid-gray/40 hover:bg-red-500/10 cursor-pointer"
+                        title={t("settings.general.shortcut.remove", "Remove")}
+                      >
+                        {t("settings.general.shortcut.removeSymbol", "✕")}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {recordingIndex === "add" ? (
+            <div
+              ref={(ref) => setShortcutRef("add", ref)}
+              className="px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
+            >
+              {formatCurrentKeys()}
+            </div>
+          ) : (
+            recordingIndex === null && shortcuts.length < 3 && (
+              <button
+                type="button"
+                onClick={() => startRecording("add")}
+                className="px-2 py-1 text-sm font-semibold border border-dashed border-logo-primary/60 text-logo-primary hover:border-logo-primary hover:bg-logo-primary/10 rounded-md cursor-pointer transition-all"
+              >
+                + {t("settings.general.shortcut.addButton", "Add Shortcut")}
+              </button>
+            )
+          )}
+
+          <ResetButton
+            onClick={() => resetBinding(shortcutId)}
+            disabled={isUpdating(`binding_${shortcutId}`) || recordingIndex !== null}
+          />
+        </div>
       </div>
     </SettingContainer>
   );

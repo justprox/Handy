@@ -199,6 +199,9 @@ export const formatKeyCombination = (
   _osType: OSType,
 ): string => {
   if (!combination) return "";
+  if (combination.includes(", ")) {
+    return "Multiple (Check settings.json)";
+  }
   return combination.split("+").map(formatKeyPart).join(" + ");
 };
 

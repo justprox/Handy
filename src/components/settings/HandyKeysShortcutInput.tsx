@@ -32,7 +32,7 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
   const { t } = useTranslation();
   const { getSetting, updateBinding, resetBinding, isUpdating, isLoading } =
     useSettings();
-  const [isRecording, setIsRecording] = useState(false);
+  const [recordingIndex, setRecordingIndex] = useState<number | "add" | null>(null);
   const [currentKeys, setCurrentKeys] = useState<string>("");
   const [originalBinding, setOriginalBinding] = useState<string>("");
   const shortcutRef = useRef<HTMLDivElement | null>(null);
@@ -42,10 +42,17 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
   const osType = useOsType();
 
   const bindings = getSetting("bindings") || {};
+  const binding = bindings[shortcutId];
+  const shortcuts = (binding?.current_binding || "")
+    .split(", ")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const isRecording = recordingIndex !== null;
 
   // Handle cancellation
   const cancelRecording = useCallback(async () => {
-    if (!isRecording) return;
+    if (recordingIndex === null) return;
 
     // Stop listening for backend events
     if (unlistenRef.current) {
@@ -66,15 +73,15 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
       }
     }
 
-    setIsRecording(false);
+    setRecordingIndex(null);
     setCurrentKeys("");
     currentKeysRef.current = "";
     setOriginalBinding("");
-  }, [isRecording, originalBinding, shortcutId, updateBinding, t]);
+  }, [recordingIndex, originalBinding, shortcutId, updateBinding, t]);
 
   // Set up event listener for handy-keys events
   useEffect(() => {
-    if (!isRecording) return;
+    if (recordingIndex === null) return;
 
     let cleanup = false;
 
@@ -94,8 +101,18 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
           } else if (!is_key_down && currentKeysRef.current) {
             // Key released - commit the shortcut using the ref value
             const keysToCommit = currentKeysRef.current;
+            let newBindingValue = "";
+
+            if (recordingIndex === "add") {
+              newBindingValue = [...shortcuts, keysToCommit].join(", ");
+            } else {
+              const updated = [...shortcuts];
+              updated[recordingIndex] = keysToCommit;
+              newBindingValue = updated.join(", ");
+            }
+
             try {
-              await updateBinding(shortcutId, keysToCommit);
+              await updateBinding(shortcutId, newBindingValue);
             } catch (error) {
               console.error("Failed to change binding:", error);
               toast.error(
@@ -121,7 +138,7 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
               unlistenRef.current = null;
             }
             await commands.stopHandyKeysRecording().catch(console.error);
-            setIsRecording(false);
+            setRecordingIndex(null);
             setCurrentKeys("");
             currentKeysRef.current = "";
             setOriginalBinding("");
@@ -144,17 +161,17 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
       commands.stopHandyKeysRecording().catch(console.error);
     };
   }, [
-    isRecording,
+    recordingIndex,
     shortcutId,
     originalBinding,
     updateBinding,
-    cancelRecording,
+    shortcuts,
     t,
   ]);
 
   // Handle click outside
   useEffect(() => {
-    if (!isRecording) return;
+    if (recordingIndex === null) return;
 
     const handleClickOutside = (e: MouseEvent) => {
       if (
@@ -167,19 +184,19 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
 
     window.addEventListener("click", handleClickOutside);
     return () => window.removeEventListener("click", handleClickOutside);
-  }, [isRecording, cancelRecording]);
+  }, [recordingIndex, cancelRecording]);
 
-  // Start recording a new shortcut
-  const startRecording = async () => {
-    if (isRecording) return;
+  // Start recording a new shortcut or editing one
+  const startRecording = async (index: number | "add") => {
+    if (recordingIndex !== null) return;
 
     // Store the original binding to restore if canceled
-    setOriginalBinding(bindings[shortcutId]?.current_binding || "");
+    setOriginalBinding(binding?.current_binding || "");
 
     // Start backend recording
     try {
       await commands.startHandyKeysRecording(shortcutId);
-      setIsRecording(true);
+      setRecordingIndex(index);
       setCurrentKeys("");
       currentKeysRef.current = "";
     } catch (error) {
@@ -187,6 +204,23 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
       toast.error(
         t("settings.general.shortcut.errors.set", { error: String(error) }),
       );
+    }
+  };
+
+  // Remove a shortcut from the list
+  const removeShortcut = async (indexToRemove: number) => {
+    if (shortcuts.length <= 1) {
+      toast.warning(t("settings.general.shortcut.errors.keepAtLeastOne", "At least one shortcut must be configured."));
+      return;
+    }
+    const updated = shortcuts.filter((_, idx) => idx !== indexToRemove);
+    const newBindingValue = updated.join(", ");
+    try {
+      await updateBinding(shortcutId, newBindingValue);
+      toast.success(t("settings.general.shortcut.removed", "Shortcut removed"));
+    } catch (error) {
+      console.error("Failed to remove shortcut:", error);
+      toast.error(t("settings.general.shortcut.errors.remove", "Failed to remove shortcut"));
     }
   };
 
@@ -228,7 +262,6 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
     );
   }
 
-  const binding = bindings[shortcutId];
   if (!binding) {
     return (
       <SettingContainer
@@ -263,26 +296,68 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
       disabled={disabled}
       layout="horizontal"
     >
-      <div className="flex items-center space-x-1">
-        {isRecording ? (
-          <div
-            ref={shortcutRef}
-            className="px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
-          >
-            {formatCurrentKeys()}
-          </div>
-        ) : (
-          <div
-            className="px-2 py-1 text-sm font-semibold bg-mid-gray/10 border border-mid-gray/80 hover:bg-logo-primary/10 rounded-md cursor-pointer hover:border-logo-primary"
-            onClick={startRecording}
-          >
-            {formatKeyCombination(binding.current_binding, osType)}
-          </div>
-        )}
-        <ResetButton
-          onClick={() => resetBinding(shortcutId)}
-          disabled={isUpdating(`binding_${shortcutId}`)}
-        />
+      <div className="flex flex-col space-y-2 w-full max-w-md items-end">
+        <div className="flex flex-wrap gap-2 justify-end items-center">
+          {shortcuts.map((sc, index) => {
+            const isThisRecording = recordingIndex === index;
+            return (
+              <div key={index} className="flex items-center space-x-1">
+                {isThisRecording ? (
+                  <div
+                    ref={shortcutRef}
+                    className="px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
+                  >
+                    {formatCurrentKeys()}
+                  </div>
+                ) : (
+                  <div className="flex items-center bg-mid-gray/10 border border-mid-gray/80 hover:border-logo-primary hover:bg-logo-primary/5 rounded-md overflow-hidden">
+                    <span
+                      className="px-2 py-1 text-sm font-semibold cursor-pointer select-none"
+                      onClick={() => startRecording(index)}
+                      title={t("settings.general.shortcut.clickToEdit", "Click to edit")}
+                    >
+                      {formatKeyCombination(sc, osType)}
+                    </span>
+                    {shortcuts.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => removeShortcut(index)}
+                        className="px-1.5 py-1 text-xs hover:text-red-500 text-text/50 border-l border-mid-gray/40 hover:bg-red-500/10 cursor-pointer"
+                        title={t("settings.general.shortcut.remove", "Remove")}
+                      >
+                        {t("settings.general.shortcut.removeSymbol", "✕")}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {recordingIndex === "add" ? (
+            <div
+              ref={shortcutRef}
+              className="px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
+            >
+              {formatCurrentKeys()}
+            </div>
+          ) : (
+            recordingIndex === null && shortcuts.length < 3 && (
+              <button
+                type="button"
+                onClick={() => startRecording("add")}
+                className="px-2 py-1 text-sm font-semibold border border-dashed border-logo-primary/60 text-logo-primary hover:border-logo-primary hover:bg-logo-primary/10 rounded-md cursor-pointer transition-all"
+              >
+                + {t("settings.general.shortcut.addButton", "Add Shortcut")}
+              </button>
+            )
+          )}
+
+          <ResetButton
+            onClick={() => resetBinding(shortcutId)}
+            disabled={isUpdating(`binding_${shortcutId}`) || recordingIndex !== null}
+          />
+        </div>
       </div>
     </SettingContainer>
   );

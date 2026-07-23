@@ -180,10 +180,17 @@
             "description": "Optional: A dedicated hotkey that always applies AI post-processing to your transcription."
           }
         },
+        "addButton": "Add Shortcut",
+        "clickToEdit": "Click to edit",
+        "remove": "Remove",
+        "removeSymbol": "✕",
+        "removed": "Shortcut removed",
         "errors": {
           "restore": "Failed to restore original shortcut",
           "set": "Failed to set shortcut: {{error}}",
-          "reset": "Failed to reset shortcut to original value"
+          "reset": "Failed to reset shortcut to original value",
+          "keepAtLeastOne": "At least one shortcut must be configured",
+          "remove": "Failed to remove shortcut"
         }
       },
       "language": {
