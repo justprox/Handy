@@ -71,87 +71,129 @@ pub fn validate_shortcut(raw: &str) -> Result<(), String> {
 
 /// Register a shortcut using Tauri's global-shortcut plugin
 pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<(), String> {
-    // Validate for Tauri requirements
-    if let Err(e) = validate_shortcut(&binding.current_binding) {
-        warn!(
-            "register_tauri_shortcut validation error for binding '{}': {}",
-            binding.current_binding, e
-        );
-        return Err(e);
-    }
+    let shortcuts = super::split_shortcuts(&binding.current_binding);
+    let mut registered = Vec::new();
 
-    // Parse shortcut and return error if it fails
-    let shortcut = match binding.current_binding.parse::<Shortcut>() {
-        Ok(s) => s,
-        Err(e) => {
-            let error_msg = format!(
-                "Failed to parse shortcut '{}': {}",
-                binding.current_binding, e
+    for shortcut_str in &shortcuts {
+        // Validate for Tauri requirements
+        if let Err(e) = validate_shortcut(shortcut_str) {
+            warn!(
+                "register_tauri_shortcut validation error for binding '{}' in '{}': {}",
+                shortcut_str, binding.current_binding, e
             );
-            error!("register_tauri_shortcut parse error: {}", error_msg);
+            // Rollback already registered ones in this call
+            for r in registered {
+                let mut b = binding.clone();
+                b.current_binding = r;
+                let _ = unregister_shortcut(app, b);
+            }
+            return Err(e);
+        }
+
+        // Parse shortcut and return error if it fails
+        let shortcut = match shortcut_str.parse::<Shortcut>() {
+            Ok(s) => s,
+            Err(e) => {
+                let error_msg = format!(
+                    "Failed to parse shortcut '{}': {}",
+                    shortcut_str, e
+                );
+                error!("register_tauri_shortcut parse error: {}", error_msg);
+                // Rollback
+                for r in registered {
+                    let mut b = binding.clone();
+                    b.current_binding = r;
+                    let _ = unregister_shortcut(app, b);
+                }
+                return Err(error_msg);
+            }
+        };
+
+        // Prevent duplicate registrations that would silently shadow one another
+        if app.global_shortcut().is_registered(shortcut) {
+            let error_msg = format!("Shortcut '{}' is already in use", shortcut_str);
+            warn!("register_tauri_shortcut duplicate error: {}", error_msg);
+            // Rollback
+            for r in registered {
+                let mut b = binding.clone();
+                b.current_binding = r;
+                let _ = unregister_shortcut(app, b);
+            }
             return Err(error_msg);
         }
-    };
 
-    // Prevent duplicate registrations that would silently shadow one another
-    if app.global_shortcut().is_registered(shortcut) {
-        let error_msg = format!("Shortcut '{}' is already in use", binding.current_binding);
-        warn!("register_tauri_shortcut duplicate error: {}", error_msg);
-        return Err(error_msg);
-    }
+        // Clone binding.id for use in the closure
+        let binding_id_for_closure = binding.id.clone();
 
-    // Clone binding.id for use in the closure
-    let binding_id_for_closure = binding.id.clone();
+        let register_res = app.global_shortcut()
+            .on_shortcut(shortcut, move |app_handle, scut, event| {
+                if scut == &shortcut {
+                    let shortcut_string = scut.into_string();
+                    let is_pressed = event.state == ShortcutState::Pressed;
+                    handle_shortcut_event(
+                        app_handle,
+                        &binding_id_for_closure,
+                        &shortcut_string,
+                        is_pressed,
+                    );
+                }
+            });
 
-    app.global_shortcut()
-        .on_shortcut(shortcut, move |app_handle, scut, event| {
-            if scut == &shortcut {
-                let shortcut_string = scut.into_string();
-                let is_pressed = event.state == ShortcutState::Pressed;
-                handle_shortcut_event(
-                    app_handle,
-                    &binding_id_for_closure,
-                    &shortcut_string,
-                    is_pressed,
-                );
-            }
-        })
-        .map_err(|e| {
+        if let Err(e) = register_res {
             let error_msg = format!(
                 "Couldn't register shortcut '{}': {}",
-                binding.current_binding, e
+                shortcut_str, e
             );
             error!("register_tauri_shortcut registration error: {}", error_msg);
-            error_msg
-        })?;
+            // Rollback
+            for r in registered {
+                let mut b = binding.clone();
+                b.current_binding = r;
+                let _ = unregister_shortcut(app, b);
+            }
+            return Err(error_msg);
+        }
+
+        registered.push(shortcut_str.clone());
+    }
 
     Ok(())
 }
 
 /// Unregister a shortcut from Tauri's global-shortcut plugin
 pub fn unregister_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<(), String> {
-    let shortcut = match binding.current_binding.parse::<Shortcut>() {
-        Ok(s) => s,
-        Err(e) => {
+    let shortcuts = super::split_shortcuts(&binding.current_binding);
+    let mut last_error = None;
+
+    for shortcut_str in &shortcuts {
+        let shortcut = match shortcut_str.parse::<Shortcut>() {
+            Ok(s) => s,
+            Err(e) => {
+                let error_msg = format!(
+                    "Failed to parse shortcut '{}' for unregistration: {}",
+                    shortcut_str, e
+                );
+                error!("unregister_tauri_shortcut parse error: {}", error_msg);
+                last_error = Some(error_msg);
+                continue;
+            }
+        };
+
+        if let Err(e) = app.global_shortcut().unregister(shortcut) {
             let error_msg = format!(
-                "Failed to parse shortcut '{}' for unregistration: {}",
-                binding.current_binding, e
+                "Failed to unregister shortcut '{}': {}",
+                shortcut_str, e
             );
-            error!("unregister_tauri_shortcut parse error: {}", error_msg);
-            return Err(error_msg);
+            error!("unregister_tauri_shortcut error: {}", error_msg);
+            last_error = Some(error_msg);
         }
-    };
+    }
 
-    app.global_shortcut().unregister(shortcut).map_err(|e| {
-        let error_msg = format!(
-            "Failed to unregister shortcut '{}': {}",
-            binding.current_binding, e
-        );
-        error!("unregister_tauri_shortcut error: {}", error_msg);
-        error_msg
-    })?;
-
-    Ok(())
+    if let Some(err) = last_error {
+        Err(err)
+    } else {
+        Ok(())
+    }
 }
 
 /// Register the cancel shortcut (called when recording starts)

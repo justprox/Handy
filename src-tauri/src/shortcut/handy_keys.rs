@@ -28,7 +28,7 @@
 //! via Tauri's event system.
 
 use handy_keys::{Hotkey, HotkeyId, HotkeyManager, HotkeyState, KeyboardListener};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde::Serialize;
 use specta::Type;
 use std::collections::HashMap;
@@ -120,7 +120,7 @@ impl HandyKeysState {
         };
 
         // Maps binding IDs to HotkeyIds and hotkey strings
-        let mut binding_to_hotkey: HashMap<String, HotkeyId> = HashMap::new();
+        let mut binding_to_hotkey: HashMap<String, Vec<HotkeyId>> = HashMap::new();
         let mut hotkey_to_binding: HashMap<HotkeyId, (String, String)> = HashMap::new(); // (binding_id, hotkey_string)
 
         loop {
@@ -186,44 +186,69 @@ impl HandyKeysState {
     /// Register a hotkey
     fn do_register(
         manager: &HotkeyManager,
-        binding_to_hotkey: &mut HashMap<String, HotkeyId>,
+        binding_to_hotkey: &mut HashMap<String, Vec<HotkeyId>>,
         hotkey_to_binding: &mut HashMap<HotkeyId, (String, String)>,
         binding_id: &str,
         hotkey_string: &str,
     ) -> Result<(), String> {
-        let hotkey: Hotkey = hotkey_string
-            .parse()
-            .map_err(|e| format!("Failed to parse hotkey '{}': {}", hotkey_string, e))?;
+        let shortcuts = crate::shortcut::split_shortcuts(hotkey_string);
+        let mut registered_ids = Vec::new();
 
-        let id = manager
-            .register(hotkey)
-            .map_err(|e| format!("Failed to register hotkey: {}", e))?;
+        for shortcut_str in &shortcuts {
+            let hotkey: Hotkey = shortcut_str
+                .parse()
+                .map_err(|e| format!("Failed to parse hotkey '{}': {}", shortcut_str, e))?;
 
-        binding_to_hotkey.insert(binding_id.to_string(), id);
-        hotkey_to_binding.insert(id, (binding_id.to_string(), hotkey_string.to_string()));
+            let id = manager
+                .register(hotkey)
+                .map_err(|e| {
+                    // Rollback already registered ones in this call
+                    for rid in &registered_ids {
+                        let _ = manager.unregister(*rid);
+                        hotkey_to_binding.remove(rid);
+                    }
+                    format!("Failed to register hotkey: {}", e)
+                })?;
+
+            registered_ids.push(id);
+            hotkey_to_binding.insert(id, (binding_id.to_string(), shortcut_str.to_string()));
+        }
+
+        binding_to_hotkey
+            .entry(binding_id.to_string())
+            .or_default()
+            .extend(registered_ids);
 
         debug!(
-            "Registered handy-keys shortcut: {} -> {:?}",
-            binding_id, hotkey
+            "Registered handy-keys shortcut(s) for {}: {}",
+            binding_id, hotkey_string
         );
         Ok(())
     }
 
-    /// Unregister a hotkey
     fn do_unregister(
         manager: &HotkeyManager,
-        binding_to_hotkey: &mut HashMap<String, HotkeyId>,
+        binding_to_hotkey: &mut HashMap<String, Vec<HotkeyId>>,
         hotkey_to_binding: &mut HashMap<HotkeyId, (String, String)>,
         binding_id: &str,
     ) -> Result<(), String> {
-        if let Some(id) = binding_to_hotkey.remove(binding_id) {
-            manager
-                .unregister(id)
-                .map_err(|e| format!("Failed to unregister hotkey: {}", e))?;
-            hotkey_to_binding.remove(&id);
-            debug!("Unregistered handy-keys shortcut: {}", binding_id);
+        let mut last_error = None;
+        if let Some(ids) = binding_to_hotkey.remove(binding_id) {
+            for id in ids {
+                if let Err(e) = manager.unregister(id) {
+                    let error_msg = format!("Failed to unregister hotkey {:?}: {}", id, e);
+                    warn!("{}", error_msg);
+                    last_error = Some(error_msg);
+                }
+                hotkey_to_binding.remove(&id);
+            }
+            debug!("Unregistered handy-keys shortcut(s) for: {}", binding_id);
         }
-        Ok(())
+        if let Some(err) = last_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
     }
 
     /// Register a shortcut binding

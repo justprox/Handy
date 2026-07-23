@@ -323,6 +323,42 @@ pub fn get_keyboard_implementation(app: AppHandle) -> String {
     }
 }
 
+/// Parses a string of shortcuts separated by `", "` (comma followed by space).
+/// 
+/// ### Design Decision: Comma-Space Delimiter
+/// Multiple active shortcuts are serialized as a simple, flat string separated by `", "` 
+/// rather than a JSON array string or a native database array schema.
+/// This decision was made to:
+/// 1. Maintain complete backward-compatibility: The settings schema remains unchanged,
+///    preventing deserialization crashes and setting resets on older/newer application version transitions.
+/// 2. Keep generated TypeScript bindings (`tauri-specta`) simple, avoiding breaking changes across
+///    many React components.
+/// 3. Allow clean manual configuration: Power users can edit `settings_store.json` directly 
+///    without escaping quotes inside a JSON string.
+/// 4. Avoid comma key conflicts: The comma key itself (e.g. `"ctrl+,"`) is always parsed and serialized
+///    without trailing spaces. Since this helper splits strictly on `", "` (comma followed by space),
+///    a shortcut containing the comma key will never be split incorrectly.
+pub fn split_shortcuts(bindings_str: &str) -> Vec<String> {
+    let mut list: Vec<String> = bindings_str
+        .split(", ")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if list.len() > 3 {
+        warn!("More than 3 shortcuts specified in settings. Only the first 3 will be used.");
+        list.truncate(3);
+    }
+
+    list
+}
+
+/// Joins a slice of individual shortcut combinations into a single string separated by `", "`.
+#[allow(dead_code)]
+pub fn join_shortcuts(shortcuts: &[String]) -> String {
+    shortcuts.join(", ")
+}
+
 // ============================================================================
 // Validation Helpers
 // ============================================================================
@@ -332,10 +368,17 @@ fn validate_shortcut_for_implementation(
     raw: &str,
     implementation: KeyboardImplementation,
 ) -> Result<(), String> {
-    match implementation {
-        KeyboardImplementation::Tauri => tauri_impl::validate_shortcut(raw),
-        KeyboardImplementation::HandyKeys => handy_keys::validate_shortcut(raw),
+    let shortcuts = split_shortcuts(raw);
+    if shortcuts.is_empty() {
+        return Err("Shortcut cannot be empty".into());
     }
+    for shortcut in shortcuts {
+        match implementation {
+            KeyboardImplementation::Tauri => tauri_impl::validate_shortcut(&shortcut)?,
+            KeyboardImplementation::HandyKeys => handy_keys::validate_shortcut(&shortcut)?,
+        }
+    }
+    Ok(())
 }
 
 /// Parse a keyboard implementation string into the enum
@@ -1279,4 +1322,28 @@ pub async fn get_available_accelerators() -> crate::managers::transcription::Ava
     tauri::async_runtime::spawn_blocking(crate::managers::transcription::get_available_accelerators)
         .await
         .expect("get_available_accelerators panicked")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_shortcuts() {
+        assert_eq!(split_shortcuts(""), Vec::<String>::new());
+        assert_eq!(split_shortcuts("ctrl+space"), vec!["ctrl+space".to_string()]);
+        assert_eq!(split_shortcuts("ctrl+space, capslock"), vec!["ctrl+space".to_string(), "capslock".to_string()]);
+        assert_eq!(split_shortcuts("ctrl+,, option+,"), vec!["ctrl+,".to_string(), "option+,".to_string()]);
+        assert_eq!(
+            split_shortcuts("ctrl+a, ctrl+b, ctrl+c, ctrl+d"),
+            vec!["ctrl+a".to_string(), "ctrl+b".to_string(), "ctrl+c".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_join_shortcuts() {
+        assert_eq!(join_shortcuts(&[]), "");
+        assert_eq!(join_shortcuts(&["ctrl+space".to_string()]), "ctrl+space");
+        assert_eq!(join_shortcuts(&["ctrl+space".to_string(), "capslock".to_string()]), "ctrl+space, capslock");
+    }
 }
